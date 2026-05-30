@@ -9,7 +9,7 @@ import fs from 'fs/promises';
 import { createServer as createViteServer } from 'vite';
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 const DB_FILE_PATH = path.join(process.cwd(), 'data', 'templates_db.json');
 
 // Ensure DB directory and file exist

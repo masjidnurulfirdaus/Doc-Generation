@@ -34,6 +34,8 @@ import {
 } from './db';
 import PizZip from 'pizzip';
 import Docxtemplater from 'docxtemplater';
+// @ts-ignore
+import mammoth from 'mammoth';
 
 // --- Default Templates & Presets ---
 const PRESET_INVITATION = `PANITIA REUNI AKBAR SEKOLAH MENENGAH ATAS 1
@@ -89,6 +91,27 @@ Jakarta, {tanggal}
 const PRESET_INVITATION_SUB1 = "Joko\nAgung\nSiti Rahma\nBambang\nClara Wijaya";
 const PRESET_INVITATION_SUB2 = "Andi\nBudi\nJoni\nDewi Lestari";
 
+// --- Word Generation Helpers ---
+const fileToBase64 = (file: File): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = error => reject(error);
+  });
+};
+
+const dataURLToArrayBuffer = (dataUrl: string): ArrayBuffer => {
+  const base64Part = dataUrl.split(',')[1];
+  const binaryString = window.atob(base64Part);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes.buffer;
+};
+
 export default function App() {
   // --- States ---
   const [templates, setTemplates] = useState<DocTemplateRecord[]>([]);
@@ -117,10 +140,130 @@ export default function App() {
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [generationSuccess, setGenerationSuccess] = useState<boolean>(false);
 
+  // --- Mammoth DOCX Rendering States ---
+  const [docxHtmlPreview, setDocxHtmlPreview] = useState<string>('');
+  const [isRenderingDocx, setIsRenderingDocx] = useState<boolean>(false);
+  const [docxPrintHtmls, setDocxPrintHtmls] = useState<string[]>([]);
+  const [isPreparingPrint, setIsPreparingPrint] = useState<boolean>(false);
+
   // --- Initialization ---
   useEffect(() => {
     loadAllTemplatesData();
   }, []);
+
+  // --- Dynamic DOCX Live Preview Compiler ---
+  useEffect(() => {
+    let active = true;
+    const renderDocx = async () => {
+      if (!selectedTemplate || selectedTemplate.templateType !== 'docx' || !selectedTemplate.docxFileData) {
+        setDocxHtmlPreview('');
+        return;
+      }
+      
+      setIsRenderingDocx(true);
+      try {
+        const { maxLen } = getRecipientsLists(selectedTemplate);
+        if (maxLen === 0) {
+          setDocxHtmlPreview('<div class="p-8 text-center text-slate-500 font-medium">Silakan isi baris penerima terlebih dahulu untuk melihat pratinjau.</div>');
+          setIsRenderingDocx(false);
+          return;
+        }
+
+        const content = dataURLToArrayBuffer(selectedTemplate.docxFileData);
+        const zip = new PizZip(content);
+        const doc = new Docxtemplater(zip, {
+          paragraphLoop: true,
+          linebreaks: true,
+        });
+
+        const pageVars = getPageVariables(selectedTemplate, previewPage);
+        doc.render(pageVars);
+
+        const out = doc.getZip().generate({
+          type: 'arraybuffer',
+        });
+
+        // @ts-ignore
+        const result = await mammoth.convertToHtml({ arrayBuffer: out });
+        if (active) {
+          setDocxHtmlPreview(result.value || '<div class="p-8 text-center text-slate-400">Dokumen kosong setelah di-konversi.</div>');
+        }
+      } catch (err: any) {
+        console.error('Gagal merender pratonton DOCX:', err);
+        if (active) {
+          setDocxHtmlPreview(
+            `<div class="p-8 text-red-700 bg-red-50 rounded-xl border border-red-200">
+              <p class="font-bold">Gagal menggabungkan variabel ke pratinjau DOCX.</p>
+              <p class="text-xs mt-1.5 font-mono">${err?.message || err}</p>
+              <p class="text-xs text-slate-500 mt-2">Pastikan seluruh tag kurung kurawal di dokumen Word Anda tertutup dengan benar, misalnya {nama} dan tidak ada tag kosong {} atau tag yang salah penulisan.</p>
+            </div>`
+          );
+        }
+      } finally {
+        if (active) {
+          setIsRenderingDocx(false);
+        }
+      }
+    };
+
+    renderDocx();
+    return () => {
+      active = false;
+    };
+  }, [selectedTemplate, previewPage, templates]);
+
+  // --- Dynamic DOCX Print Pages Pre-compiler ---
+  useEffect(() => {
+    let active = true;
+    const preparePrintPages = async () => {
+      if (!selectedTemplate || selectedTemplate.templateType !== 'docx' || !selectedTemplate.docxFileData) {
+        setDocxPrintHtmls([]);
+        return;
+      }
+      const { maxLen } = getRecipientsLists(selectedTemplate);
+      if (maxLen === 0) {
+        setDocxPrintHtmls([]);
+        return;
+      }
+
+      setIsPreparingPrint(true);
+      try {
+        const content = dataURLToArrayBuffer(selectedTemplate.docxFileData);
+
+        const promises = Array.from({ length: maxLen }).map(async (_, pageIdx) => {
+          const zip = new PizZip(content);
+          const doc = new Docxtemplater(zip, {
+            paragraphLoop: true,
+            linebreaks: true,
+          });
+          const pageVars = getPageVariables(selectedTemplate, pageIdx);
+          doc.render(pageVars);
+          const out = doc.getZip().generate({
+            type: 'arraybuffer',
+          });
+          // @ts-ignore
+          const res = await mammoth.convertToHtml({ arrayBuffer: out });
+          return res.value;
+        });
+
+        const compiled = await Promise.all(promises);
+        if (active) {
+          setDocxPrintHtmls(compiled);
+        }
+      } catch (err) {
+        console.error('Gagal menyiapkan cetakan DOCX:', err);
+      } finally {
+        if (active) {
+          setIsPreparingPrint(false);
+        }
+      }
+    };
+
+    preparePrintPages();
+    return () => {
+      active = false;
+    };
+  }, [selectedTemplate, templates]);
 
   const loadAllTemplatesData = async () => {
     try {
@@ -286,27 +429,6 @@ export default function App() {
 
   const handleRemoveCustomField = (id: string) => {
     setFormCustomFields(formCustomFields.filter(f => f.id !== id));
-  };
-
-  // --- Word Generation & Processing Engine ---
-  const fileToBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = error => reject(error);
-    });
-  };
-
-  const dataURLToArrayBuffer = (dataUrl: string): ArrayBuffer => {
-    const base64Part = dataUrl.split(',')[1];
-    const binaryString = window.atob(base64Part);
-    const len = binaryString.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
-    return bytes.buffer;
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1087,52 +1209,24 @@ export default function App() {
                         )}
                       </div>
                     ) : (
-                      /* DOCX TEMPLATE INFO PREVIEW CARD */
-                      <div className="w-full max-w-2xl bg-white border border-slate-200 rounded-2xl p-6 shadow-sm flex flex-col gap-5 text-slate-700 print:hidden">
-                        <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
-                          <div className="p-3 bg-emerald-50 text-emerald-600 rounded-xl">
-                            <FileText className="w-6 h-6" />
+                      /* DOCX TEMPLATE LAYOUT PREVIEW */
+                      <div 
+                        id="docx-paper-preview" 
+                        className="bg-white w-full max-w-[21cm] min-h-[29.7cm] shadow-lg border border-slate-250 p-[2.5cm] flex flex-col font-sans relative flex-1 text-slate-900 leading-relaxed print:shadow-none print:border-none print:p-0 print:m-0 docx-preview-content"
+                      >
+                        {isRenderingDocx ? (
+                          <div className="flex-1 flex flex-col items-center justify-center p-8 text-slate-400 gap-2">
+                            <RefreshCw className="w-8 h-8 animate-spin text-blue-600" />
+                            <span className="text-xs font-semibold">Menghubungkan variabel & merender Word...</span>
                           </div>
-                          <div>
-                            <h4 className="font-bold text-slate-900">Word Template Merger (.docx)</h4>
-                            <p className="text-xs text-slate-500 font-medium">Berkas Word di-render menggunakan mesin template di client-side.</p>
+                        ) : (
+                          <div className="flex-1 flex flex-col justify-between">
+                            <div dangerouslySetInnerHTML={{ __html: docxHtmlPreview }} />
+                            <div className="text-[10px] text-slate-300 select-none text-right pt-6 border-t border-slate-50 print:hidden mt-auto">
+                              Halaman {previewPage + 1} dari {previewMaxLen} (Pratinjau Word)
+                            </div>
                           </div>
-                        </div>
-
-                        <div className="bg-slate-55 bg-slate-50/50 p-4 rounded-xl border border-slate-200 space-y-3.5">
-                          <div className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center justify-between">
-                            <span>Siklus Data Terganti Halaman {previewPage + 1}</span>
-                          </div>
-
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                            {Object.entries(getPageVariables(currentDetails, previewPage)).map(([key, val]) => (
-                              <div key={key} className="flex justify-between items-center bg-white border border-slate-150 rounded-lg p-2.5">
-                                <span className="font-bold font-mono text-emerald-700 bg-emerald-50/50 px-1.5 py-0.5 rounded">{`{${key}}`}</span>
-                                <span className="text-slate-800 font-extrabold max-w-[150px] truncate">{val}</span>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-
-                        <div className="space-y-2.5 text-xs text-slate-600">
-                          <div className="font-bold text-slate-800 flex items-center gap-1.5 text-sm">
-                            <Sparkles className="w-4 h-4 text-blue-600" />
-                            <span>Cara Kerja DOCX Mail Merge</span>
-                          </div>
-                          <p className="leading-relaxed">
-                            Aplikasi meng-unzip struktur file binary <span className="font-semibold text-slate-900">{currentDetails.docxFileName}</span>, men-scan seluruh tag pengganti seperti <code className="bg-slate-100 p-0.5 rounded font-bold">{`{nama}`}</code>, kemudian mencetak loop data baru yang berformat standard Word template secara aman.
-                          </p>
-                          <div className="p-3 bg-slate-50 border border-slate-150 rounded-xl space-y-1.5">
-                            <p className="font-bold text-slate-800">Saran Pembuatan Berkas Word:</p>
-                            <p>Bungkus tulisan surat di Word Anda dengan tag pelindung loop:</p>
-                            <code className="block bg-slate-900 text-slate-100 p-2 rounded-lg font-mono tracking-tight text-[11px]">
-                              {`{#penerima_list}`}<br />
-                              ... isi surat Anda disini, gunakan tag {`{nama}`} atau {`{nama1}`} & {`{nama2}`} ...<br />
-                              [Page Break]<br />
-                              {`{/penerima_list}`}
-                            </code>
-                          </div>
-                        </div>
+                        )}
                       </div>
                     )}
 
@@ -1181,10 +1275,14 @@ export default function App() {
                           }
                         })
                       ) : (
-                        <div className="p-8 text-center border-4 border-slate-400 m-8">
-                          <h1 className="text-xl font-bold mb-4">Mailing Word Template Hasil Render</h1>
-                          <p className="text-sm">Silakan gunakan tombol "Download Gabungan DOCX" di samping untuk men-download file Microsoft Word (.docx) hasil Mail Merge secara lengkap.</p>
-                        </div>
+                        docxPrintHtmls.map((html, pageIdx) => (
+                          <div 
+                            key={pageIdx} 
+                            className="print-page bg-white w-[21cm] min-h-[29.7cm] p-[2cm] leading-relaxed text-slate-900 docx-preview-content"
+                            style={{ pageBreakAfter: 'always', boxSizing: 'border-box' }}
+                            dangerouslySetInnerHTML={{ __html: html }}
+                          />
+                        ))
                       )}
                     </div>
 
@@ -1270,6 +1368,42 @@ export default function App() {
 
       {/* TAMBAHAN PRINT CSS DI SCREEN UNTUK PRESISI CETAKAN */}
       <style>{`
+        /* PRATINJAU DOKUMEN WORD (DOCX) */
+        .docx-preview-content {
+          font-family: 'Inter', system-ui, sans-serif;
+          font-size: 13.5px;
+          color: #1e293b;
+          line-height: 1.6;
+        }
+        .docx-preview-content p {
+          margin-bottom: 0.85rem;
+          line-height: 1.6;
+        }
+        .docx-preview-content table {
+          width: 100% !important;
+          border-collapse: collapse;
+          margin-top: 1rem;
+          margin-bottom: 1rem;
+        }
+        .docx-preview-content th, .docx-preview-content td {
+          border: 1px solid #cbd5e1;
+          padding: 8px 12px;
+          text-align: left;
+        }
+        .docx-preview-content th {
+          background-color: #f8fafc;
+          font-weight: 600;
+        }
+        .docx-preview-content h1, .docx-preview-content h2, .docx-preview-content h3, .docx-preview-content h4 {
+          font-weight: 700;
+          color: #0f172a;
+          margin-top: 1.25rem;
+          margin-bottom: 0.5rem;
+        }
+        .docx-preview-content h1 { font-size: 1.5rem; }
+        .docx-preview-content h2 { font-size: 1.25rem; }
+        .docx-preview-content h3 { font-size: 1.1rem; }
+
         @media print {
           /* CSS PRINT ADJUSTMENT */
           body, html {
