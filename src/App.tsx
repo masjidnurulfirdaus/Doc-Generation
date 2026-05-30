@@ -538,12 +538,15 @@ export default function App() {
             )}
           </div>
 
-          <div className="bg-slate-50 rounded-xl p-3 border border-slate-200 text-xs text-slate-600 leading-relaxed font-sans mt-auto">
-            <div className="flex items-center gap-1.5 font-bold text-slate-800 mb-1">
-              <Sparkles className="w-3.5 h-3.5 text-blue-600" />
-              <span>Sistem Penyimpanan Klien</span>
+          <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 text-xs text-slate-600 leading-relaxed font-sans mt-auto">
+            <div className="flex items-center gap-1.5 font-bold text-slate-800 mb-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-blue-650 shrink-0" />
+              <span>Database Server Aktif</span>
             </div>
-            Data template dan berkas Word Anda disimpan dengan aman dan gratis di dalam browser Anda menggunakan teknologi IndexedDB.
+            Data template, variabel, dan berkas Word Anda disimpan secara aman dalam **Database Server Lokal** (<code className="bg-slate-200 px-1 py-0.5 rounded text-blue-700 font-bold">templates_db.json</code>).
+            <div className="mt-2 text-slate-500">
+              Sangat cocok untuk **deploy di server lokal** dan dibuka kembali dari komputer mana saja tanpa takut kehilangan data. Browser IndexedDB juga terus dicadangkan sebagai backup hibrida.
+            </div>
           </div>
         </aside>
 
