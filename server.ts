@@ -7,6 +7,8 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs/promises';
 import { createServer as createViteServer } from 'vite';
+// @ts-ignore
+import libre from 'libreoffice-convert';
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
@@ -83,6 +85,39 @@ app.delete('/api/templates/:id', async (req, res) => {
   } catch (error) {
     console.error('Gagal menghapus template dari disk:', error);
     res.status(500).json({ error: 'Gagal menghapus dari database server' });
+  }
+});
+
+// POST /api/convert-to-pdf
+app.post('/api/convert-to-pdf', async (req, res) => {
+  try {
+    const { docxBase64 } = req.body;
+    if (!docxBase64) {
+      return res.status(400).json({ error: 'Data DOCX base64 tidak boleh kosong' });
+    }
+
+    const docxBuf = Buffer.from(docxBase64, 'base64');
+    
+    // Gunakan libreoffice-convert untuk melakukan konversi
+    libre.convert(docxBuf, '.pdf', undefined, (err: any, pdfBuf: any) => {
+      if (err) {
+        console.error('Gagal konversi dengan libreoffice-convert:', err);
+        return res.status(500).json({
+          error: 'Gagal mengonversi DOCX ke PDF via LibreOffice Server.',
+          details: err.message || String(err),
+          code: 'LIBREOFFICE_ERROR'
+        });
+      }
+      
+      const pdfBase64 = pdfBuf.toString('base64');
+      res.json({ success: true, pdfBase64 });
+    });
+  } catch (error: any) {
+    console.error('Server error saat konversi PDF:', error);
+    res.status(500).json({ 
+      error: 'Terjadi kesalahan sistem di server saat memproses PDF',
+      details: error.message || String(error)
+    });
   }
 });
 

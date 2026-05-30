@@ -212,6 +212,12 @@ export default function App() {
   const docxPrintContainerRef = useRef<HTMLDivElement>(null);
   const [isRenderingDocx, setIsRenderingDocx] = useState<boolean>(false);
 
+  // --- PDF Server Conversion & Preview States ---
+  const [useServerPdf, setUseServerPdf] = useState<boolean>(false);
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState<boolean>(false);
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
+  const [pdfGenerationError, setPdfGenerationError] = useState<string | null>(null);
+
   // --- Initialization ---
   useEffect(() => {
     loadAllTemplatesData();
@@ -226,6 +232,7 @@ export default function App() {
       }
       
       setIsRenderingDocx(true);
+      setPdfGenerationError(null);
       try {
         const { maxLen } = getRecipientsLists(selectedTemplate);
         if (maxLen === 0) {
@@ -258,29 +265,85 @@ export default function App() {
           type: 'arraybuffer',
         });
 
-        if (active && docxPreviewContainerRef.current) {
-          docxPreviewContainerRef.current.innerHTML = ''; // Clean prior render
-          await renderAsync(out, docxPreviewContainerRef.current, undefined, {
-            className: "docx-preview",
-            inWrapper: true,
-            ignoreWidth: false,
-            ignoreHeight: false,
-            breakPages: true
+        if (useServerPdf) {
+          // --- CONVERT TO PDF VIA LibreOffice-convert API ---
+          setIsGeneratingPdf(true);
+          
+          // Convert ArrayBuffer to Base64 safely
+          let binary = '';
+          const bytes = new Uint8Array(out);
+          const len = bytes.byteLength;
+          for (let i = 0; i < len; i++) {
+            binary += String.fromCharCode(bytes[i]);
+          }
+          const docxBase64 = window.btoa(binary);
+
+          const response = await fetch('/api/convert-to-pdf', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ docxBase64 }),
           });
+
+          const data = await response.json();
+          if (!response.ok || !data.success) {
+            throw new Error(data.error || 'Server LibreOffice gagal mengubah Word ke PDF');
+          }
+
+          if (active) {
+            const pdfBinaryString = window.atob(data.pdfBase64);
+            const pdfLen = pdfBinaryString.length;
+            const pdfBytes = new Uint8Array(pdfLen);
+            for (let i = 0; i < pdfLen; i++) {
+              pdfBytes[i] = pdfBinaryString.charCodeAt(i);
+            }
+            const pdfBlob = new Blob([pdfBytes], { type: 'application/pdf' });
+            
+            // Clean up previous blob URL to avoid leak
+            setPdfPreviewUrl(prev => {
+              if (prev) URL.revokeObjectURL(prev);
+              return URL.createObjectURL(pdfBlob);
+            });
+          }
+        } else {
+          // --- RENDER DOCX CLIENT-SIDE (Fast Web Estimate) ---
+          if (active && docxPreviewContainerRef.current) {
+            docxPreviewContainerRef.current.innerHTML = ''; // Clean prior render
+            await renderAsync(out, docxPreviewContainerRef.current, undefined, {
+              className: "docx-preview",
+              inWrapper: true,
+              ignoreWidth: false,
+              ignoreHeight: false,
+              breakPages: true
+            });
+          }
         }
       } catch (err: any) {
-        console.error('Gagal merender pratonton DOCX dengan docx-preview:', err);
-        if (active && docxPreviewContainerRef.current) {
-          docxPreviewContainerRef.current.innerHTML = `
-            <div class="p-8 text-red-700 bg-red-50 rounded-xl border border-red-200">
-              <p class="font-bold">Gagal menggabungkan variabel ke pratinjau DOCX.</p>
-              <p class="text-xs mt-1.5 font-mono">${err?.message || err}</p>
-              <p class="text-xs text-slate-500 mt-2">Pastikan seluruh tag kurung kurawal di dokumen Word Anda tertutup dengan benar, misalnya {nama} dan tidak ada tag kosong {} atau tag yang salah penulisan.</p>
-            </div>`;
+        console.error('Gagal memproses pratinjau DOCX:', err);
+        if (useServerPdf) {
+          if (active) {
+            setPdfGenerationError(
+              err?.message || 
+              'LibreOffice (soffice) tidak merespon atau tidak terpasang di container server cloud. Mengaktifkan fallback visual Word.'
+            );
+            // Matikan mode server PDF, otomatis kembali ke render browser
+            setUseServerPdf(false);
+          }
+        } else {
+          if (active && docxPreviewContainerRef.current) {
+            docxPreviewContainerRef.current.innerHTML = `
+              <div class="p-8 text-red-700 bg-red-50 rounded-xl border border-red-200">
+                <p class="font-bold">Gagal menggabungkan variabel ke pratinjau DOCX.</p>
+                <p class="text-xs mt-1.5 font-mono">${err?.message || err}</p>
+                <p class="text-xs text-slate-500 mt-2">Pastikan seluruh tag kurung kurawal di dokumen Word Anda tertutup dengan benar, misalnya {nama} dan tidak ada tag kosong {} atau tag yang salah penulisan.</p>
+              </div>`;
+          }
         }
       } finally {
         if (active) {
           setIsRenderingDocx(false);
+          setIsGeneratingPdf(false);
         }
       }
     };
@@ -294,7 +357,7 @@ export default function App() {
       active = false;
       clearTimeout(timer);
     };
-  }, [selectedTemplate, previewPage, templates]);
+  }, [selectedTemplate, previewPage, templates, useServerPdf]);
 
   // --- Dynamic DOCX Print Pages Pre-compiler ---
   useEffect(() => {
@@ -1217,27 +1280,39 @@ export default function App() {
                     </div>
 
                     {/* UTILITY GENERATOR TRIGGERS */}
-                    <div className="pt-4 border-t border-slate-100 space-y-2 shrink-0">
+                    <div className="pt-4 border-t border-slate-100 space-y-3 shrink-0">
+                      {currentDetails.templateType === 'docx' && (
+                        <div className="bg-gradient-to-br from-blue-50 via-indigo-50/55 to-white border border-blue-200 rounded-xl p-3.5 text-xs text-blue-900 space-y-1.5 print:hidden shadow-xs">
+                          <div className="font-bold flex items-center gap-1.5 text-blue-800">
+                            <Info className="w-4 h-4 text-blue-600 shrink-0" />
+                            Rekomendasi Cetak Rapi (100% Pas)
+                          </div>
+                          <p className="text-slate-600 leading-relaxed text-[11px]">
+                            Pratinjau browser adalah estimasi visual bebas instalasi. Agar seluruh margin, border kop surat, tabel, dan spasi halaman <strong>presisi sempurna dan tidak melenceng sekecil apa pun</strong>, klik tombol <strong>Download Gabungan DOCX</strong> lalu cetak langsung menggunakan <strong>Microsoft Word</strong> atau <strong>Google Docs</strong>.
+                          </p>
+                        </div>
+                      )}
+
                       {currentDetails.templateType === 'docx' && (
                         <button
                           onClick={handleGeneratedocx}
-                          className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold p-3 rounded-xl transition text-sm shadow-md shadow-emerald-50"
+                          className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold p-3.5 rounded-xl transition text-sm shadow-md shadow-emerald-100/70 hover:shadow-emerald-200/90 active:scale-[0.99] transform"
                         >
                           <Download className="w-4 h-4" />
-                          Download Gabungan DOCX
+                          Download Gabungan DOCX (Sangat Direkomendasikan)
                         </button>
                       )}
                       
                       <button
                         onClick={handlePrintDocument}
-                        className="w-full flex items-center justify-center gap-2 bg-slate-900 hover:bg-slate-800 text-white font-bold p-3 rounded-xl transition text-sm shadow-md shadow-slate-200"
+                        className="w-full flex items-center justify-center gap-2 bg-slate-900 hover:bg-slate-800 text-white font-semibold p-3 rounded-xl transition text-xs shadow-xs"
                       >
                         <Printer className="w-4 h-4" />
-                        Print / Simpan PDF Halaman
+                        Print Langsung via Browser (Estimasi)
                       </button>
                       
-                      <p className="text-[10px] text-center text-slate-400 mt-1">
-                        *Gunakan CTRL+P untuk menyimpan semua halaman sebagai file PDF di dialog printer bawaan.
+                      <p className="text-[10px] text-center text-slate-400 mt-1 leading-normal">
+                        *Anda juga dapat menyimpan semua halaman dengan menekan Ctrl+P pada keyboard dan memilih opsi "Save as PDF" pada browser.
                       </p>
                     </div>
 
@@ -1330,21 +1405,96 @@ export default function App() {
                       /* DOCX TEMPLATE LAYOUT PREVIEW */
                       <div 
                         id="docx-paper-preview" 
-                        className="w-full flex-1 flex flex-col items-center print:hidden"
+                        className="w-full flex-1 flex flex-col items-center print:hidden space-y-4"
                       >
-                        {isRenderingDocx && (
-                          <div className="flex-1 flex flex-col items-center justify-center p-12 text-slate-400 gap-2 min-h-[400px]">
-                            <RefreshCw className="w-8 h-8 animate-spin text-blue-600" />
-                            <span className="text-xs font-semibold">Menghubungkan variabel & merender Word...</span>
+                        {/* Selector Jenis Pratinjau */}
+                        <div className="w-full max-w-[21cm] bg-white border border-slate-200 p-2.5 rounded-xl flex flex-col sm:flex-row items-center justify-between gap-3 text-xs shrink-0 shadow-xs">
+                          <div className="flex items-center gap-2">
+                            <FileText className="w-4 h-4 text-indigo-600" />
+                            <div className="text-left">
+                              <span className="font-bold text-slate-800">Metode Pratinjau Word (.docx)</span>
+                              <p className="text-[10px] text-slate-400">Pilih kualitas render visual dokumen</p>
+                            </div>
+                          </div>
+                          
+                          <div className="flex bg-slate-100 p-1 rounded-lg gap-1 border border-slate-200/50">
+                            <button
+                              type="button"
+                              onClick={() => setUseServerPdf(false)}
+                              className={`px-3 py-1.5 rounded-md font-bold transition flex items-center gap-1.5 ${!useServerPdf ? 'bg-white text-indigo-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}
+                            >
+                              🚀 Render Word (Cepat)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setUseServerPdf(true)}
+                              className={`px-3 py-1.5 rounded-md font-bold transition flex items-center gap-1.5 ${useServerPdf ? 'bg-white text-indigo-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}
+                            >
+                              🎯 Render PDF (High-Fidelity)
+                            </button>
+                          </div>
+                        </div>
+
+                        {pdfGenerationError && (
+                          <div className="w-full max-w-[21cm] bg-amber-50 border border-amber-200 p-3 rounded-xl text-amber-900 text-xs flex flex-col gap-1">
+                            <div className="font-bold flex items-center gap-1.5">
+                              <AlertCircle className="w-3.5 h-3.5 text-amber-600 animate-pulse" />
+                              Konversi PDF Server Terbatas (Fallback Otomatis)
+                            </div>
+                            <p className="text-[11px] text-slate-600 leading-relaxed">
+                              {pdfGenerationError} <br />
+                              Aplikasi otomatis menggunakan compiler HTML Word interaktif. Jangan khawatir, hasil file Word gabungan yang Anda download nanti akan 100% rapi dan presisi saat dicetak menggunakan MS Word lokal Anda.
+                            </p>
                           </div>
                         )}
-                        <div 
-                          ref={docxPreviewContainerRef} 
-                          className={isRenderingDocx ? "hidden" : "w-full flex justify-center"} 
-                        />
-                        {!isRenderingDocx && (
-                          <div className="w-full max-w-[21cm] text-[10px] text-slate-400 select-none text-right pt-4 border-t border-slate-150 print:hidden mt-2">
-                            Halaman {previewPage + 1} dari {previewMaxLen} (Pratinjau Word Asli)
+
+                        {useServerPdf && isGeneratingPdf && (
+                          <div className="w-full max-w-[21cm] min-h-[400px] bg-white border border-slate-200/80 rounded-xl shadow-lg flex flex-col items-center justify-center p-12 text-slate-400 gap-3">
+                            <RefreshCw className="w-8 h-8 animate-spin text-indigo-600" />
+                            <div className="text-center">
+                              <p className="text-xs font-bold text-slate-700">Menghubungi LibreOffice Server...</p>
+                              <p className="text-[10px] text-slate-400 mt-1">Mengonversi file Word dan variabel ke dokumen PDF presisi tinggi</p>
+                            </div>
+                          </div>
+                        )}
+
+                        {useServerPdf && !isGeneratingPdf && pdfPreviewUrl && (
+                          <div className="w-full max-w-[21cm] bg-white border border-slate-200/80 rounded-xl shadow-lg overflow-hidden flex flex-col">
+                            <iframe 
+                              src={pdfPreviewUrl} 
+                              className="w-full h-[80vh] border-0" 
+                              title="High Fidelity PDF Preview"
+                            />
+                            <div className="bg-slate-50 border-t border-slate-100 p-3 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500 gap-2">
+                              <span className="font-medium">File PDF dihasilkan langsung dari binary LibreOffice Server</span>
+                              <a 
+                                href={pdfPreviewUrl} 
+                                download={`Preview_Halaman_${previewPage + 1}.pdf`}
+                                className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg transition text-[11px]"
+                              >
+                                Unduh Halaman PDF ini
+                              </a>
+                            </div>
+                          </div>
+                        )}
+
+                        {!useServerPdf && (
+                          <div className="w-full flex-1 flex flex-col items-center">
+                            {isRenderingDocx && (
+                              <div className="w-full max-w-[21cm] min-h-[400px] bg-white border border-slate-200/80 rounded-xl shadow-lg flex-1 flex flex-col items-center justify-center p-12 text-slate-400 gap-2 min-h-[400px]">
+                                <RefreshCw className="w-8 h-8 animate-spin text-blue-600" />
+                                <span className="text-xs font-semibold">Menghubungkan variabel & merender Word...</span>
+                              </div>
+                            )}
+                            <div 
+                              ref={docxPreviewContainerRef} 
+                              className={isRenderingDocx ? "hidden" : "w-full flex justify-center"} 
+                            />
+                            {!isRenderingDocx && (
+                              <div className="w-full max-w-[21cm] text-[10px] text-slate-400 select-none text-right pt-4 border-t border-slate-150 print:hidden mt-2">
+                                Halaman {previewPage + 1} dari {previewMaxLen} (Pratinjau Word Asli)
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
