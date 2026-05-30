@@ -36,6 +36,8 @@ import PizZip from 'pizzip';
 import Docxtemplater from 'docxtemplater';
 // @ts-ignore
 import mammoth from 'mammoth';
+// @ts-ignore
+import { renderAsync } from 'docx-preview';
 
 // --- Default Templates & Presets ---
 const PRESET_INVITATION = `PANITIA REUNI AKBAR SEKOLAH MENENGAH ATAS 1
@@ -120,7 +122,9 @@ const prepareZipFile = (docxFileData: string, maxLen: number): PizZip => {
   try {
     const settingsXml = zip.file("word/settings.xml")?.asText();
     if (settingsXml) {
-       const cleanedSettings = settingsXml.replace(/<w:mailMerge[^>]*>[\s\S]*?<\/w:mailMerge>/g, "");
+       const cleanedSettings = settingsXml
+         .replace(/<w:mailMerge[^>]*>[\s\S]*?<\/w:mailMerge>/gi, "")
+         .replace(/<mailMerge[^>]*>[\s\S]*?<\/mailMerge>/gi, "");
        zip.file("word/settings.xml", cleanedSettings);
     }
   } catch (err) {
@@ -146,7 +150,7 @@ const prepareZipFile = (docxFileData: string, maxLen: number): PizZip => {
             docXml = pStart + 
               "<w:p><w:r><w:t>{#penerima_list}</w:t></w:r></w:p>" + 
               pMiddle + 
-              "{#hasMore}<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>{/hasMore}" +
+              "<w:p><w:r><w:t>{#hasMore}</w:t></w:r><w:r><w:br w:type=\"page\"/></w:r><w:r><w:t>{/hasMore}</w:t></w:r></w:p>" +
               "<w:p><w:r><w:t>{/penerima_list}</w:t></w:r></w:p>" + 
               pEnd;
           } else {
@@ -159,7 +163,7 @@ const prepareZipFile = (docxFileData: string, maxLen: number): PizZip => {
               docXml = pStart + 
                 "<w:p><w:r><w:t>{#penerima_list}</w:t></w:r></w:p>" + 
                 pMiddle + 
-                "{#hasMore}<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>{/hasMore}" +
+                "<w:p><w:r><w:t>{#hasMore}</w:t></w:r><w:r><w:br w:type=\"page\"/></w:r><w:r><w:t>{/hasMore}</w:t></w:r></w:p>" +
                 "<w:p><w:r><w:t>{/penerima_list}</w:t></w:r></w:p>" + 
                 pEnd;
             }
@@ -203,11 +207,10 @@ export default function App() {
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [generationSuccess, setGenerationSuccess] = useState<boolean>(false);
 
-  // --- Mammoth DOCX Rendering States ---
-  const [docxHtmlPreview, setDocxHtmlPreview] = useState<string>('');
+  // --- DOCX Rendering & Print Refs ---
+  const docxPreviewContainerRef = useRef<HTMLDivElement>(null);
+  const docxPrintContainerRef = useRef<HTMLDivElement>(null);
   const [isRenderingDocx, setIsRenderingDocx] = useState<boolean>(false);
-  const [docxPrintHtmls, setDocxPrintHtmls] = useState<string[]>([]);
-  const [isPreparingPrint, setIsPreparingPrint] = useState<boolean>(false);
 
   // --- Initialization ---
   useEffect(() => {
@@ -219,7 +222,6 @@ export default function App() {
     let active = true;
     const renderDocx = async () => {
       if (!selectedTemplate || selectedTemplate.templateType !== 'docx' || !selectedTemplate.docxFileData) {
-        setDocxHtmlPreview('');
         return;
       }
       
@@ -227,7 +229,9 @@ export default function App() {
       try {
         const { maxLen } = getRecipientsLists(selectedTemplate);
         if (maxLen === 0) {
-          setDocxHtmlPreview('<div class="p-8 text-center text-slate-500 font-medium">Silakan isi baris penerima terlebih dahulu untuk melihat pratinjau.</div>');
+          if (docxPreviewContainerRef.current) {
+            docxPreviewContainerRef.current.innerHTML = '<div class="p-8 text-center text-slate-500 font-medium">Silakan isi baris penerima terlebih dahulu untuk melihat pratinjau.</div>';
+          }
           setIsRenderingDocx(false);
           return;
         }
@@ -254,21 +258,25 @@ export default function App() {
           type: 'arraybuffer',
         });
 
-        // @ts-ignore
-        const result = await mammoth.convertToHtml({ arrayBuffer: out });
-        if (active) {
-          setDocxHtmlPreview(result.value || '<div class="p-8 text-center text-slate-400">Dokumen kosong setelah di-konversi.</div>');
+        if (active && docxPreviewContainerRef.current) {
+          docxPreviewContainerRef.current.innerHTML = ''; // Clean prior render
+          await renderAsync(out, docxPreviewContainerRef.current, undefined, {
+            className: "docx-preview",
+            inWrapper: true,
+            ignoreWidth: false,
+            ignoreHeight: false,
+            breakPages: true
+          });
         }
       } catch (err: any) {
-        console.error('Gagal merender pratonton DOCX:', err);
-        if (active) {
-          setDocxHtmlPreview(
-            `<div class="p-8 text-red-700 bg-red-50 rounded-xl border border-red-200">
+        console.error('Gagal merender pratonton DOCX dengan docx-preview:', err);
+        if (active && docxPreviewContainerRef.current) {
+          docxPreviewContainerRef.current.innerHTML = `
+            <div class="p-8 text-red-700 bg-red-50 rounded-xl border border-red-200">
               <p class="font-bold">Gagal menggabungkan variabel ke pratinjau DOCX.</p>
               <p class="text-xs mt-1.5 font-mono">${err?.message || err}</p>
               <p class="text-xs text-slate-500 mt-2">Pastikan seluruh tag kurung kurawal di dokumen Word Anda tertutup dengan benar, misalnya {nama} dan tidak ada tag kosong {} atau tag yang salah penulisan.</p>
-            </div>`
-          );
+            </div>`;
         }
       } finally {
         if (active) {
@@ -277,9 +285,14 @@ export default function App() {
       }
     };
 
-    renderDocx();
+    // Delay render briefly to let the container mount if templates changed
+    const timer = setTimeout(() => {
+      renderDocx();
+    }, 50);
+
     return () => {
       active = false;
+      clearTimeout(timer);
     };
   }, [selectedTemplate, previewPage, templates]);
 
@@ -288,59 +301,75 @@ export default function App() {
     let active = true;
     const preparePrintPages = async () => {
       if (!selectedTemplate || selectedTemplate.templateType !== 'docx' || !selectedTemplate.docxFileData) {
-        setDocxPrintHtmls([]);
         return;
       }
-      const { maxLen } = getRecipientsLists(selectedTemplate);
+      const { r1, r2, maxLen } = getRecipientsLists(selectedTemplate);
       if (maxLen === 0) {
-        setDocxPrintHtmls([]);
         return;
       }
 
-      setIsPreparingPrint(true);
       try {
-        const promises = Array.from({ length: maxLen }).map(async (_, pageIdx) => {
-          const zip = prepareZipFile(selectedTemplate.docxFileData!, maxLen);
-          const doc = new Docxtemplater(zip, {
-            paragraphLoop: true,
-            linebreaks: true,
-          });
-          const pageVars = getPageVariables(selectedTemplate, pageIdx);
-          const singleItem = {
-            ...pageVars,
-            hasMore: false,
-            isLast: true
-          };
-
-          doc.render({
-            penerima_list: [singleItem],
-            ...singleItem
-          });
-
-          const out = doc.getZip().generate({
-            type: 'arraybuffer',
-          });
-          // @ts-ignore
-          const res = await mammoth.convertToHtml({ arrayBuffer: out });
-          return res.value;
+        const zip = prepareZipFile(selectedTemplate.docxFileData!, maxLen);
+        const doc = new Docxtemplater(zip, {
+          paragraphLoop: true,
+          linebreaks: true,
         });
 
-        const compiled = await Promise.all(promises);
-        if (active) {
-          setDocxPrintHtmls(compiled);
+        // global variables as fallback
+        const globalVars: Record<string, string> = {};
+        selectedTemplate.customFields.forEach(f => {
+          globalVars[f.name] = f.value;
+        });
+
+        const listData = [];
+        for (let i = 0; i < maxLen; i++) {
+          const item: Record<string, any> = { ...globalVars };
+          if (selectedTemplate.recipientsPerPage === 1) {
+            item['nama'] = r1[i] || '-';
+          } else {
+            item['nama1'] = r1[i] || '-';
+            item['nama2'] = r2[i] || '-';
+            item['nama'] = `${r1[i] || '-'} & ${r2[i] || '-'}`;
+          }
+          item['hasMore'] = (i < maxLen - 1);
+          item['isLast'] = (i === maxLen - 1);
+          listData.push(item);
+        }
+
+        doc.render({
+          penerima_list: listData,
+          ...globalVars,
+          nama: listData[0]?.nama || '-',
+          nama1: listData[0]?.nama1 || '-',
+          nama2: listData[0]?.nama2 || '-'
+        });
+
+        const out = doc.getZip().generate({
+          type: 'arraybuffer',
+        });
+
+        if (active && docxPrintContainerRef.current) {
+          docxPrintContainerRef.current.innerHTML = '';
+          await renderAsync(out, docxPrintContainerRef.current, undefined, {
+            className: "docx-print",
+            inWrapper: true,
+            ignoreWidth: false,
+            ignoreHeight: false,
+            breakPages: true
+          });
         }
       } catch (err) {
-        console.error('Gagal menyiapkan cetakan DOCX:', err);
-      } finally {
-        if (active) {
-          setIsPreparingPrint(false);
-        }
+        console.error('Gagal menyiapkan cetakan DOCX dengan docx-preview:', err);
       }
     };
 
-    preparePrintPages();
+    const timer = setTimeout(() => {
+      preparePrintPages();
+    }, 100);
+
     return () => {
       active = false;
+      clearTimeout(timer);
     };
   }, [selectedTemplate, templates]);
 
@@ -1301,19 +1330,21 @@ export default function App() {
                       /* DOCX TEMPLATE LAYOUT PREVIEW */
                       <div 
                         id="docx-paper-preview" 
-                        className="bg-white w-full max-w-[21cm] min-h-[29.7cm] shadow-lg border border-slate-250 p-[2.5cm] flex flex-col font-sans relative flex-1 text-slate-900 leading-relaxed print:shadow-none print:border-none print:p-0 print:m-0 docx-preview-content"
+                        className="w-full flex-1 flex flex-col items-center print:hidden"
                       >
-                        {isRenderingDocx ? (
-                          <div className="flex-1 flex flex-col items-center justify-center p-8 text-slate-400 gap-2">
+                        {isRenderingDocx && (
+                          <div className="flex-1 flex flex-col items-center justify-center p-12 text-slate-400 gap-2 min-h-[400px]">
                             <RefreshCw className="w-8 h-8 animate-spin text-blue-600" />
                             <span className="text-xs font-semibold">Menghubungkan variabel & merender Word...</span>
                           </div>
-                        ) : (
-                          <div className="flex-1 flex flex-col justify-between">
-                            <div dangerouslySetInnerHTML={{ __html: docxHtmlPreview }} />
-                            <div className="text-[10px] text-slate-300 select-none text-right pt-6 border-t border-slate-50 print:hidden mt-auto">
-                              Halaman {previewPage + 1} dari {previewMaxLen} (Pratinjau Word)
-                            </div>
+                        )}
+                        <div 
+                          ref={docxPreviewContainerRef} 
+                          className={isRenderingDocx ? "hidden" : "w-full flex justify-center"} 
+                        />
+                        {!isRenderingDocx && (
+                          <div className="w-full max-w-[21cm] text-[10px] text-slate-400 select-none text-right pt-4 border-t border-slate-150 print:hidden mt-2">
+                            Halaman {previewPage + 1} dari {previewMaxLen} (Pratinjau Word Asli)
                           </div>
                         )}
                       </div>
@@ -1332,13 +1363,13 @@ export default function App() {
                                 className="print-page bg-white w-[21cm] min-h-[29.7cm] p-[2cm] grid grid-cols-2 gap-10 leading-relaxed text-slate-900"
                                 style={{ pageBreakAfter: 'always', boxSizing: 'border-box' }}
                               >
-                                {/* SISI KIRI */}
+                                {/ * SISI KIRI * /}
                                 <div className="border-r border-slate-100 pr-5 flex flex-col justify-between">
                                   <div className="text-[12px] whitespace-pre-wrap leading-relaxed">
                                     {replacePlaceholders(currentDetails.webContent, pageVars)}
                                   </div>
                                 </div>
-                                {/* SISI KANAN */}
+                                {/ * SISI KANAN * /}
                                 <div className="flex flex-col justify-between">
                                   <div className="text-[12px] whitespace-pre-wrap leading-relaxed">
                                     {replacePlaceholders(currentDetails.webContent, {
@@ -1364,14 +1395,7 @@ export default function App() {
                           }
                         })
                       ) : (
-                        docxPrintHtmls.map((html, pageIdx) => (
-                          <div 
-                            key={pageIdx} 
-                            className="print-page bg-white w-[21cm] min-h-[29.7cm] p-[2cm] leading-relaxed text-slate-900 docx-preview-content"
-                            style={{ pageBreakAfter: 'always', boxSizing: 'border-box' }}
-                            dangerouslySetInnerHTML={{ __html: html }}
-                          />
-                        ))
+                        <div ref={docxPrintContainerRef} className="w-full" />
                       )}
                     </div>
 
@@ -1464,34 +1488,23 @@ export default function App() {
           color: #1e293b;
           line-height: 1.6;
         }
-        .docx-preview-content p {
-          margin-bottom: 0.85rem;
-          line-height: 1.6;
+
+        /* Overrides custom untuk docx-preview library visual rendering di mode live preview screen */
+        .docx-preview .docx-wrapper {
+          background-color: transparent !important;
+          padding: 0 !important;
+          font-family: inherit !important;
+          display: flex !important;
+          justify-content: center !important;
         }
-        .docx-preview-content table {
-          width: 100% !important;
-          border-collapse: collapse;
-          margin-top: 1rem;
-          margin-bottom: 1rem;
+        .docx-preview .docx-wrapper > section.docx {
+          box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1) !important;
+          border: 1px solid #e2e8f0 !important;
+          border-radius: 12px !important;
+          background-color: white !important;
+          box-sizing: border-box !important;
+          margin: 10px auto !important;
         }
-        .docx-preview-content th, .docx-preview-content td {
-          border: 1px solid #cbd5e1;
-          padding: 8px 12px;
-          text-align: left;
-        }
-        .docx-preview-content th {
-          background-color: #f8fafc;
-          font-weight: 600;
-        }
-        .docx-preview-content h1, .docx-preview-content h2, .docx-preview-content h3, .docx-preview-content h4 {
-          font-weight: 700;
-          color: #0f172a;
-          margin-top: 1.25rem;
-          margin-bottom: 0.5rem;
-        }
-        .docx-preview-content h1 { font-size: 1.5rem; }
-        .docx-preview-content h2 { font-size: 1.25rem; }
-        .docx-preview-content h3 { font-size: 1.1rem; }
 
         @media print {
           /* CSS PRINT ADJUSTMENT */
@@ -1520,6 +1533,27 @@ export default function App() {
             padding: 2cm !important;
             min-height: 29.7cm !important;
             width: 21cm !important;
+            box-sizing: border-box !important;
+            background: white !important;
+          }
+
+          /* Print formatting untuk high-fidelity cetakan docx-preview */
+          .docx-print .docx-wrapper {
+            padding: 0 !important;
+            background: transparent !important;
+            box-shadow: none !important;
+            margin: 0 !important;
+            display: block !important;
+          }
+          .docx-print .docx-wrapper > section.docx {
+            margin: 0 !important;
+            box-shadow: none !important;
+            border: none !important;
+            border-radius: 0 !important;
+            page-break-before: auto !important;
+            page-break-after: always !important;
+            page-break-inside: avoid !important;
+            width: 100% !important;
             box-sizing: border-box !important;
             background: white !important;
           }
