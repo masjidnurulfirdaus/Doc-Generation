@@ -112,6 +112,69 @@ const dataURLToArrayBuffer = (dataUrl: string): ArrayBuffer => {
   return bytes.buffer;
 };
 
+const prepareZipFile = (docxFileData: string, maxLen: number): PizZip => {
+  const content = dataURLToArrayBuffer(docxFileData);
+  const zip = new PizZip(content);
+
+  // 1. Clean mailMerge SQL alert in settings.xml
+  try {
+    const settingsXml = zip.file("word/settings.xml")?.asText();
+    if (settingsXml) {
+       const cleanedSettings = settingsXml.replace(/<w:mailMerge[^>]*>[\s\S]*?<\/w:mailMerge>/g, "");
+       zip.file("word/settings.xml", cleanedSettings);
+    }
+  } catch (err) {
+    console.warn("Gagal membersihkan settings.xml:", err);
+  }
+
+  // 2. Validate and auto-wrap document.xml body in loops if there are no loop tags
+  try {
+    let docXml = zip.file("word/document.xml")?.asText();
+    if (docXml) {
+      // Check if there's any manual loop tag
+      const hasLoop = docXml.includes("penerima_list") || docXml.includes("{#") || docXml.includes("{/");
+      
+      if (!hasLoop && maxLen > 0) {
+        const bodyStart = docXml.indexOf("<w:body>");
+        if (bodyStart !== -1) {
+          const sectPrIdx = docXml.lastIndexOf("<w:sectPr");
+          if (sectPrIdx !== -1) {
+            const pStart = docXml.slice(0, bodyStart + 8);
+            const pEnd = docXml.slice(sectPrIdx);
+            const pMiddle = docXml.slice(bodyStart + 8, sectPrIdx);
+            
+            docXml = pStart + 
+              "<w:p><w:r><w:t>{#penerima_list}</w:t></w:r></w:p>" + 
+              pMiddle + 
+              "{#hasMore}<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>{/hasMore}" +
+              "<w:p><w:r><w:t>{/penerima_list}</w:t></w:r></w:p>" + 
+              pEnd;
+          } else {
+            const bodyEnd = docXml.lastIndexOf("</w:body>");
+            if (bodyEnd !== -1) {
+              const pStart = docXml.slice(0, bodyStart + 8);
+              const pEnd = docXml.slice(bodyEnd);
+              const pMiddle = docXml.slice(bodyStart + 8, bodyEnd);
+              
+              docXml = pStart + 
+                "<w:p><w:r><w:t>{#penerima_list}</w:t></w:r></w:p>" + 
+                pMiddle + 
+                "{#hasMore}<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>{/hasMore}" +
+                "<w:p><w:r><w:t>{/penerima_list}</w:t></w:r></w:p>" + 
+                pEnd;
+            }
+          }
+          zip.file("word/document.xml", docXml);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("Gagal memodifikasi document.xml:", err);
+  }
+
+  return zip;
+};
+
 export default function App() {
   // --- States ---
   const [templates, setTemplates] = useState<DocTemplateRecord[]>([]);
@@ -169,15 +232,23 @@ export default function App() {
           return;
         }
 
-        const content = dataURLToArrayBuffer(selectedTemplate.docxFileData);
-        const zip = new PizZip(content);
+        const zip = prepareZipFile(selectedTemplate.docxFileData, maxLen);
         const doc = new Docxtemplater(zip, {
           paragraphLoop: true,
           linebreaks: true,
         });
 
         const pageVars = getPageVariables(selectedTemplate, previewPage);
-        doc.render(pageVars);
+        const singleItem = {
+          ...pageVars,
+          hasMore: false,
+          isLast: true
+        };
+
+        doc.render({
+          penerima_list: [singleItem],
+          ...singleItem
+        });
 
         const out = doc.getZip().generate({
           type: 'arraybuffer',
@@ -228,16 +299,24 @@ export default function App() {
 
       setIsPreparingPrint(true);
       try {
-        const content = dataURLToArrayBuffer(selectedTemplate.docxFileData);
-
         const promises = Array.from({ length: maxLen }).map(async (_, pageIdx) => {
-          const zip = new PizZip(content);
+          const zip = prepareZipFile(selectedTemplate.docxFileData!, maxLen);
           const doc = new Docxtemplater(zip, {
             paragraphLoop: true,
             linebreaks: true,
           });
           const pageVars = getPageVariables(selectedTemplate, pageIdx);
-          doc.render(pageVars);
+          const singleItem = {
+            ...pageVars,
+            hasMore: false,
+            isLast: true
+          };
+
+          doc.render({
+            penerima_list: [singleItem],
+            ...singleItem
+          });
+
           const out = doc.getZip().generate({
             type: 'arraybuffer',
           });
@@ -498,8 +577,7 @@ export default function App() {
     }
 
     try {
-      const content = dataURLToArrayBuffer(selectedTemplate.docxFileData);
-      const zip = new PizZip(content);
+      const zip = prepareZipFile(selectedTemplate.docxFileData, maxLen);
       const doc = new Docxtemplater(zip, {
         paragraphLoop: true,
         linebreaks: true,
@@ -514,7 +592,7 @@ export default function App() {
       // Build loop structure for {#penerima_list} ... {/penerima_list}
       const listData = [];
       for (let i = 0; i < maxLen; i++) {
-        const item: Record<string, string> = { ...globalVars };
+        const item: Record<string, any> = { ...globalVars };
         if (selectedTemplate.recipientsPerPage === 1) {
           item['nama'] = r1[i] || '-';
         } else {
@@ -522,6 +600,8 @@ export default function App() {
           item['nama2'] = r2[i] || '-';
           item['nama'] = `${r1[i] || '-'} & ${r2[i] || '-'}`;
         }
+        item['hasMore'] = (i < maxLen - 1);
+        item['isLast'] = (i === maxLen - 1);
         listData.push(item);
       }
 
@@ -1025,13 +1105,22 @@ export default function App() {
                         </span>
                         <h2 className="text-lg font-bold text-slate-900 leading-snug mt-1">{currentDetails.title}</h2>
                       </div>
-                      <button
-                        onClick={() => handleEditTemplate(currentDetails)}
-                        className="p-2 border border-slate-200 hover:bg-slate-50 rounded-xl text-slate-600 transition shrink-0"
-                        title="Edit data ini"
-                      >
-                        <Edit2 className="w-4 h-4" />
-                      </button>
+                      <div className="flex gap-1.5 shrink-0">
+                        <button
+                          onClick={() => handleEditTemplate(currentDetails)}
+                          className="p-2 border border-slate-200 hover:bg-slate-50 rounded-xl text-slate-600 transition"
+                          title="Edit data ini"
+                        >
+                          <Edit2 className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={(e) => handleDeleteTemplate(currentDetails.id, e)}
+                          className="p-2 border border-slate-200 hover:border-red-200 hover:bg-red-50 rounded-xl text-slate-500 hover:text-red-600 transition"
+                          title="Hapus template"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
                     </div>
 
                     {/* STATS */}
